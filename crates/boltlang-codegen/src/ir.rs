@@ -104,6 +104,8 @@ pub struct CompiledFn<'db> {
     pub result: Option<ValTy>,
     /// The locals after the parameters.
     pub locals: Vec<ValTy>,
+    /// The names of the parameters and locals, by index.
+    pub local_names: Vec<(u32, Box<str>)>,
     pub code: Vec<Inst<'db>>,
     /// What the code calls, in order of first call.
     pub callees: Vec<Callee<'db>>,

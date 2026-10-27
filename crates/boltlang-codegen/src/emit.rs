@@ -14,8 +14,8 @@ use boltlang_hir_ty::{Ty, function_scheme};
 use boltlang_hir_ty::builtin::Builtin;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection, Function,
-    FunctionSection, ImportSection, Instruction, MemorySection, MemoryType, Module, NameMap, NameSection,
-    TypeSection, ValType,
+    FunctionSection, ImportSection, IndirectNameMap, Instruction, MemorySection, MemoryType, Module,
+    NameMap, NameSection, TypeSection, ValType,
 };
 
 use crate::{
@@ -87,6 +87,8 @@ pub fn link<'db>(db: &'db dyn Db, file: File) -> Result<Vec<u8>, Vec<CodegenErro
     let mut exports = ExportSection::new();
     let mut codes = CodeSection::new();
     let mut exported = vec!["main".to_string()];
+    let mut local_names = IndirectNameMap::new();
+    let mut has_local_names = false;
     for (i, (instance, code)) in compiled.iter().enumerate() {
         let idx = (imports.len() + i) as u32;
         functions.function(type_of((code.params.clone(), code.result)));
@@ -100,6 +102,14 @@ pub fn link<'db>(db: &'db dyn Db, file: File) -> Result<Vec<u8>, Vec<CodegenErro
             exported.push(name);
         }
         names.append(idx, &name);
+        if !code.local_names.is_empty() {
+            let mut fn_locals = NameMap::new();
+            for &(local_idx, ref local_name) in &code.local_names {
+                fn_locals.append(local_idx, local_name);
+            }
+            local_names.append(idx, &fn_locals);
+            has_local_names = true;
+        }
         codes.function(&function(code, &index, &strings));
     }
     exports.export("memory", ExportKind::Memory, 0);
@@ -119,6 +129,9 @@ pub fn link<'db>(db: &'db dyn Db, file: File) -> Result<Vec<u8>, Vec<CodegenErro
     }
     let mut name_section = NameSection::new();
     name_section.functions(&names);
+    if has_local_names {
+        name_section.locals(&local_names);
+    }
 
     let mut module = Module::new();
     module.section(&types);
@@ -158,7 +171,7 @@ impl Strings {
                 continue;
             }
             // Lengths are aligned to 4 bytes.
-            while strings.end % 4 != 0 {
+            while !strings.end.is_multiple_of(4) {
                 strings.bytes.push(0);
                 strings.end += 1;
             }

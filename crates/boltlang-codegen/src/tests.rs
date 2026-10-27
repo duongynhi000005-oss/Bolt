@@ -193,3 +193,59 @@ fn extern_functions_cant_be_run() {
         Err(RunError::MissingImport { module: "env".into(), name: "log".into() })
     );
 }
+
+#[test]
+fn locals_are_named_in_name_section() {
+    let db = TestDb::new();
+    let file = db.file(
+        "/main.bolt",
+        "fn add(a: i32, b: i32) -> i32 {\n  let sum = a + b;\n  sum\n}\nadd(1, 2);\n",
+    );
+    let bytes = compile(&db, file);
+
+    let mut function_names = std::collections::HashMap::new();
+    let mut local_names = std::collections::HashMap::new();
+
+    for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
+        if let wasmparser::Payload::CustomSection(c) = payload.unwrap() {
+            if c.name() == "name" {
+                let reader = wasmparser::NameSectionReader::new(wasmparser::BinaryReader::new(c.data(), c.data_offset()));
+                for name in reader {
+                    match name.unwrap() {
+                        wasmparser::Name::Function(names) => {
+                            for naming in names {
+                                let naming = naming.unwrap();
+                                function_names.insert(naming.index, naming.name.to_string());
+                            }
+                        }
+                        wasmparser::Name::Local(indirect) => {
+                            for naming in indirect {
+                                let naming = naming.unwrap();
+                                let mut fn_locals = std::collections::HashMap::new();
+                                for local in naming.names {
+                                    let local = local.unwrap();
+                                    fn_locals.insert(local.index, local.name.to_string());
+                                }
+                                local_names.insert(naming.index, fn_locals);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let (&add_idx, _) = function_names
+        .iter()
+        .find(|(_, name)| name.starts_with("add") || name.as_str() == "add")
+        .expect("function `add` should be in function names");
+
+    let add_locals = local_names
+        .get(&add_idx)
+        .expect("function `add` should have local names");
+
+    assert_eq!(add_locals.get(&0).map(String::as_str), Some("a"));
+    assert_eq!(add_locals.get(&1).map(String::as_str), Some("b"));
+    assert_eq!(add_locals.get(&2).map(String::as_str), Some("sum"));
+}

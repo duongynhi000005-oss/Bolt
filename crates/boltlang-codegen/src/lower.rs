@@ -136,6 +136,7 @@ pub(crate) fn compile<'db>(db: &'db dyn Db, instance: Instance<'db>) -> Result<'
         params: Vec::new(),
         result: None,
         locals: Vec::new(),
+        local_names: Vec::new(),
         bindings: HashMap::new(),
         code: Vec::new(),
         callees: Vec::new(),
@@ -146,7 +147,15 @@ pub(crate) fn compile<'db>(db: &'db dyn Db, instance: Instance<'db>) -> Result<'
         None => c.entry()?,
     }
     c.code.push(Inst::End);
-    Ok(CompiledFn { params: c.params, result: c.result, locals: c.locals, code: c.code, callees: c.callees })
+    c.local_names.sort_by_key(|(idx, _)| *idx);
+    Ok(CompiledFn {
+        params: c.params,
+        result: c.result,
+        locals: c.locals,
+        local_names: c.local_names,
+        code: c.code,
+        callees: c.callees,
+    })
 }
 
 struct Compiler<'db> {
@@ -160,6 +169,8 @@ struct Compiler<'db> {
     result: Option<ValTy>,
     /// The locals after the parameters.
     locals: Vec<ValTy>,
+    /// The names of the parameters and locals, by index.
+    local_names: Vec<(u32, Box<str>)>,
     /// The local of each variable, or `None` for one of type `()`.
     bindings: HashMap<BindingId, Option<u32>>,
     code: Vec<Inst<'db>>,
@@ -248,6 +259,9 @@ impl<'db> Compiler<'db> {
         let ty = self.subst(self.infer.binding_ty(binding));
         let local = self.val_ty(&ty, at)?.map(|ty| self.new_local(ty));
         self.bindings.insert(binding, local);
+        if let Some(local) = local {
+            self.local_names.push((local, self.body[binding].name.as_str().into()));
+        }
         Ok(local)
     }
 
@@ -275,6 +289,9 @@ impl<'db> Compiler<'db> {
             match &body[pat] {
                 Pat::Bind { id, subpat: None } => {
                     self.bindings.insert(*id, index);
+                    if let Some(index) = index {
+                        self.local_names.push((index, body[*id].name.as_str().into()));
+                    }
                 }
                 Pat::Wild => {}
                 _ => return Err(self.unsupported(body.body_expr, "a pattern in a parameter")),

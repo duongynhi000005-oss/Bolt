@@ -59,6 +59,7 @@ pub enum Inst<'db> {
     LocalSet(u32),
     LocalTee(u32),
     Call(Callee<'db>),
+    ReturnCall(Callee<'db>),
     Block(BlockTy),
     Loop(BlockTy),
     If(BlockTy),

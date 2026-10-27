@@ -158,7 +158,7 @@ impl Strings {
                 continue;
             }
             // Lengths are aligned to 4 bytes.
-            while strings.end % 4 != 0 {
+            while !strings.end.is_multiple_of(4) {
                 strings.bytes.push(0);
                 strings.end += 1;
             }
@@ -214,6 +214,7 @@ fn instruction<'a, 'db>(inst: &Inst<'db>, index: &HashMap<Callee<'db>, u32>, str
         Inst::LocalSet(i) => Instruction::LocalSet(*i),
         Inst::LocalTee(i) => Instruction::LocalTee(*i),
         Inst::Call(callee) => Instruction::Call(index[callee]),
+        Inst::ReturnCall(callee) => Instruction::ReturnCall(index[callee]),
         Inst::Block(ty) => Instruction::Block(block_type(*ty)),
         Inst::Loop(ty) => Instruction::Loop(block_type(*ty)),
         Inst::If(ty) => Instruction::If(block_type(*ty)),

@@ -140,6 +140,7 @@ pub(crate) fn compile<'db>(db: &'db dyn Db, instance: Instance<'db>) -> Result<'
         code: Vec::new(),
         callees: Vec::new(),
         frames: Vec::new(),
+        tail: false,
     };
     match scheme {
         Some(scheme) => c.function(scheme)?,
@@ -165,6 +166,7 @@ struct Compiler<'db> {
     code: Vec<Inst<'db>>,
     callees: Vec<Callee<'db>>,
     frames: Vec<Frame>,
+    tail: bool,
 }
 
 impl<'db> Compiler<'db> {
@@ -281,6 +283,7 @@ impl<'db> Compiler<'db> {
             }
         }
         self.result = self.val_ty(&ret, body.body_expr)?;
+        self.tail = true;
         self.expr_as(body.body_expr, self.result)
     }
 
@@ -352,8 +355,9 @@ impl<'db> Compiler<'db> {
     /// Compile an expression whose value, if it has one, is dropped when
     /// `want` is `None`.
     fn expr_as(&mut self, expr: ExprId, want: Option<ValTy>) -> Result<'db, ()> {
+        let is_tail = self.tail;
         self.expr(expr)?;
-        if want.is_none() && self.expr_val_ty(expr)?.is_some() {
+        if !is_tail && want.is_none() && self.expr_val_ty(expr)?.is_some() {
             self.push(Inst::Drop);
         }
         Ok(())
@@ -362,6 +366,7 @@ impl<'db> Compiler<'db> {
     /// Compile an expression, which leaves its value on the stack if its
     /// type has values.
     fn expr(&mut self, expr: ExprId) -> Result<'db, ()> {
+        let is_tail = std::mem::replace(&mut self.tail, false);
         let body = self.body;
         match &body[expr] {
             Expr::Missing => Err(self.error(expr, ErrorKind::UnknownType)),
@@ -382,6 +387,7 @@ impl<'db> Compiler<'db> {
                     self.statement(statement)?;
                 }
                 if let Some(tail) = tail {
+                    self.tail = is_tail;
                     self.expr_as(*tail, result)?;
                 }
                 if label.is_some() {
@@ -389,7 +395,7 @@ impl<'db> Compiler<'db> {
                 }
                 Ok(())
             }
-            Expr::Call { callee, args, .. } => self.call(expr, *callee, args),
+            Expr::Call { callee, args, .. } => self.call(expr, *callee, args, is_tail),
             Expr::Cast { expr: inner, .. } => self.cast(expr, *inner),
             Expr::Prefix { op, expr: inner } => self.prefix(expr, *op, *inner),
             Expr::Binary { op, lhs, rhs } => self.binary(expr, op, *lhs, *rhs),
@@ -398,9 +404,11 @@ impl<'db> Compiler<'db> {
                 self.expr(*condition)?;
                 let result = self.expr_val_ty(expr)?;
                 self.open(Inst::If(result.into()), Frame::Plain);
+                self.tail = is_tail;
                 self.expr_as(*then_branch, result)?;
                 if let Some(else_branch) = else_branch {
                     self.push(Inst::Else);
+                    self.tail = is_tail;
                     self.expr_as(*else_branch, result)?;
                 }
                 self.close();
@@ -412,7 +420,7 @@ impl<'db> Compiler<'db> {
                 let local = self.temp(*value)?;
                 self.pattern(*pat, local, &ty, *value)
             }
-            Expr::Match { expr: scrutinee, arms } => self.match_expr(expr, *scrutinee, arms),
+            Expr::Match { expr: scrutinee, arms } => self.match_expr(expr, *scrutinee, arms, is_tail),
             Expr::While { condition, body: loop_body, label } => {
                 self.open(Inst::Block(BlockTy::Empty), Frame::Break { label: *label, is_loop: true, result: None });
                 self.open(Inst::Loop(BlockTy::Empty), Frame::Continue { label: *label });
@@ -452,6 +460,7 @@ impl<'db> Compiler<'db> {
             }
             Expr::Return { expr: value } => {
                 if let Some(value) = value {
+                    self.tail = true;
                     self.expr_as(*value, self.result)?;
                 }
                 self.push(Inst::Return);
@@ -721,7 +730,7 @@ impl<'db> Compiler<'db> {
             }
             // `a <$> b` calls the function `(<$>)`.
             BinaryOp::Custom(name) => match self.resolve(expr, &Path::from_name(name.clone())) {
-                Some(ValueResolution::Value(ValueNs::Function(f))) => self.call_function(expr, f, None, &[lhs, rhs]),
+                Some(ValueResolution::Value(ValueNs::Function(f))) => self.call_function(expr, f, None, &[lhs, rhs], false),
                 _ => Err(self.unsupported(expr, "this operator")),
             },
         }
@@ -801,13 +810,13 @@ impl<'db> Compiler<'db> {
 
     // Calls
 
-    fn call(&mut self, expr: ExprId, callee: ExprId, args: &[ExprId]) -> Result<'db, ()> {
+    fn call(&mut self, expr: ExprId, callee: ExprId, args: &[ExprId], is_tail: bool) -> Result<'db, ()> {
         // `x.f(y)` is `f(x, y)`.
         if let Some(&f) = self.infer.method_calls.get(expr) {
             let Expr::Field { expr: receiver, .. } = &self.body[callee] else { unreachable!("a method call") };
             let mut all = vec![*receiver];
             all.extend_from_slice(args);
-            return self.call_function(expr, f, Some(callee), &all);
+            return self.call_function(expr, f, Some(callee), &all, is_tail);
         }
         let path = match &self.body[callee] {
             Expr::Path(path) => Some(path.clone()),
@@ -816,7 +825,7 @@ impl<'db> Compiler<'db> {
             _ => None,
         };
         match path.and_then(|p| self.resolve(callee, &p)) {
-            Some(ValueResolution::Value(ValueNs::Function(f))) => self.call_function(expr, f, Some(callee), args),
+            Some(ValueResolution::Value(ValueNs::Function(f))) => self.call_function(expr, f, Some(callee), args, is_tail),
             _ => Err(self.unsupported(callee, "calling something other than a function")),
         }
     }
@@ -827,6 +836,7 @@ impl<'db> Compiler<'db> {
         f: FunctionId<'db>,
         callee: Option<ExprId>,
         args: &[ExprId],
+        is_tail: bool,
     ) -> Result<'db, ()> {
         let db = self.db;
         let builtin = builtin(db, f);
@@ -847,10 +857,18 @@ impl<'db> Compiler<'db> {
         if !self.callees.contains(&target) {
             self.callees.push(target);
         }
-        self.push(Inst::Call(target));
-        if builtin == Some(Builtin::Panic) {
-            // The host doesn't return from `panic`.
-            self.push(Inst::Unreachable);
+        let can_tail_call = is_tail
+            && self.scheme.is_some()
+            && self.expr_val_ty(expr)? == self.result
+            && builtin != Some(Builtin::Panic);
+        if can_tail_call {
+            self.push(Inst::ReturnCall(target));
+        } else {
+            self.push(Inst::Call(target));
+            if builtin == Some(Builtin::Panic) {
+                // The host doesn't return from `panic`.
+                self.push(Inst::Unreachable);
+            }
         }
         Ok(())
     }
@@ -1002,7 +1020,7 @@ impl<'db> Compiler<'db> {
         Ok(())
     }
 
-    fn match_expr(&mut self, expr: ExprId, scrutinee: ExprId, arms: &[MatchArm]) -> Result<'db, ()> {
+    fn match_expr(&mut self, expr: ExprId, scrutinee: ExprId, arms: &[MatchArm], is_tail: bool) -> Result<'db, ()> {
         let ty = self.ty(scrutinee);
         let local = self.temp(scrutinee)?;
         let result = self.expr_val_ty(expr)?;
@@ -1017,6 +1035,7 @@ impl<'db> Compiler<'db> {
                 self.close();
             }
             self.open(Inst::If(BlockTy::Empty), Frame::Plain);
+            self.tail = is_tail;
             self.expr_as(arm.expr, result)?;
             // Out of the `if` and to the end of the `match`'s block.
             self.push(Inst::Br(1));

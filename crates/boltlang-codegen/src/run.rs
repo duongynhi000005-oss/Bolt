@@ -64,6 +64,7 @@ impl<H> State<H> {
 pub(crate) fn engine(fuel: Option<u64>) -> Engine {
     let mut config = Config::default();
     config.consume_fuel(fuel.is_some());
+    config.wasm_tail_call(true);
     Engine::new(&config)
 }
 

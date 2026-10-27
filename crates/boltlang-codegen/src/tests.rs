@@ -193,3 +193,30 @@ fn extern_functions_cant_be_run() {
         Err(RunError::MissingImport { module: "env".into(), name: "log".into() })
     );
 }
+
+#[test]
+fn tail_calls_emit_return_call() {
+    let db = TestDb::new();
+    let file = db.file(
+        "/main.bolt",
+        "fn count(n: i64, acc: i64) -> i64 = if n == 0 { acc } else { count(n - 1, acc + 1) };\ncount(1, 0);",
+    );
+    let wasm = compile(&db, file);
+    let mut has_return_call = false;
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        if let Ok(wasmparser::Payload::CodeSectionEntry(body)) = payload {
+            if let Ok(reader) = body.get_operators_reader() {
+                for op in reader {
+                    if let Ok(wasmparser::Operator::ReturnCall { .. }) = op {
+                        has_return_call = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(has_return_call, "tail recursive call should emit return_call");
+
+    let (mut store, instance) = instantiate(&wasm);
+    let result = call(&mut store, &instance, "count", &[Val::I64(1_000_000), Val::I64(0)]);
+    assert_eq!(result.and_then(|v| v.i64()), Some(1_000_000));
+}
